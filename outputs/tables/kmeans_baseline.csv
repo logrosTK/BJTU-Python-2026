@@ -1,0 +1,6 @@
+experiment,train_dataset,eval_dataset,model,train_samples,val_samples,test_samples,val_accuracy,val_macro_f1,test_accuracy,test_macro_f1,fit_seconds
+kmeans_same_corruption,identity,identity,pca64_kmeans_majority_vote,6400,1600,10000,0.364375,0.24687712296005104,0.3717,0.2525401083625677,0.5234964999999647
+kmeans_identity_to_noise,identity,shot_noise,pca64_kmeans_majority_vote,6400,1600,10000,0.364375,0.24687712296005104,0.3661,0.25082713203282603,0.5234964999999647
+kmeans_identity_to_noise,identity,rotate,pca64_kmeans_majority_vote,6400,1600,10000,0.364375,0.24687712296005104,0.2988,0.20375293443154407,0.5234964999999647
+kmeans_same_corruption,shot_noise,shot_noise,pca64_kmeans_majority_vote,6400,1600,10000,0.29625,0.22748371849315382,0.2958,0.21862406338749524,0.46044439999968745
+kmeans_same_corruption,rotate,rotate,pca64_kmeans_majority_vote,6400,1600,10000,0.270625,0.18477666443852186,0.2693,0.18375321103596792,0.5200381999998172

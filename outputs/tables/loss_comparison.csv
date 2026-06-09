@@ -1,4 +1,4 @@
 dataset,network,loss,label_smoothing,train_samples,val_samples,val_accuracy,val_macro_f1,fit_seconds
-identity,numpy_two_layer_mlp,cross_entropy,0.0,6400,1600,0.9025,0.9015777281834808,0.33896489999983714
-identity,numpy_two_layer_mlp,label_smoothing,0.1,6400,1600,0.893125,0.8921547709489357,0.35989390000008825
-identity,numpy_two_layer_mlp,mse,0.0,6400,1600,0.575625,0.5384732229751215,0.34291380000013305
+identity,numpy_two_layer_mlp,cross_entropy,0.0,6400,1600,0.9025,0.9015777281834808,0.2597545000003265
+identity,numpy_two_layer_mlp,label_smoothing,0.1,6400,1600,0.893125,0.8921547709489357,0.26076030000012906
+identity,numpy_two_layer_mlp,mse,0.0,6400,1600,0.575625,0.5384732229751215,0.26451059999999416

@@ -38,7 +38,7 @@
     "val_macro_f1": 0.9451391673839206,
     "test_accuracy": 0.9486,
     "test_macro_f1": 0.9479983287960666,
-    "fit_seconds": 1.373823899999934
+    "fit_seconds": 1.6255221999999776
   },
   "identity_cross_noise_mean_accuracy": 0.8028333333333334,
   "optional_mean_accuracy": 0.44676875,
@@ -54,7 +54,7 @@
     "val_macro_f1": 0.9465739447158406,
     "test_accuracy": 0.9516,
     "test_macro_f1": 0.9510116172546996,
-    "fit_seconds": 2.748448000000053
+    "fit_seconds": 2.2555655999999544
   },
   "optional_worst_dataset": {
     "experiment": "optional_combined_train",
@@ -68,7 +68,7 @@
     "val_macro_f1": 0.9465739447158406,
     "test_accuracy": 0.101,
     "test_macro_f1": 0.0183502906976744,
-    "fit_seconds": 2.748448000000053
+    "fit_seconds": 2.2555655999999544
   },
   "best_preprocessing": {
     "dataset": "identity",
@@ -78,7 +78,7 @@
     "val_samples": 800,
     "val_accuracy": 0.9125,
     "val_macro_f1": 0.9120173040721749,
-    "fit_seconds": 0.3919777000000977
+    "fit_seconds": 0.3067274999998517
   },
   "best_hyperparameters": {
     "dataset": "identity",
@@ -89,7 +89,7 @@
     "val_samples": 1600,
     "val_accuracy": 0.928125,
     "val_macro_f1": 0.9274509628800888,
-    "fit_seconds": 0.8827387000001181
+    "fit_seconds": 0.9599302999999964
   },
   "best_loss": {
     "dataset": "identity",
@@ -100,6 +100,28 @@
     "val_samples": 1600,
     "val_accuracy": 0.9025,
     "val_macro_f1": 0.9015777281834808,
-    "fit_seconds": 0.3389648999998371
+    "fit_seconds": 0.2597545000003265
+  },
+  "best_kmeans_baseline": {
+    "experiment": "kmeans_same_corruption",
+    "train_dataset": "identity",
+    "eval_dataset": "identity",
+    "model": "pca64_kmeans_majority_vote",
+    "train_samples": 6400,
+    "val_samples": 1600,
+    "test_samples": 10000,
+    "val_accuracy": 0.364375,
+    "val_macro_f1": 0.246877122960051,
+    "test_accuracy": 0.3717,
+    "test_macro_f1": 0.2525401083625677,
+    "fit_seconds": 0.5234964999999647
+  },
+  "best_cross_validation_model": {
+    "model": "mlp_2hidden",
+    "mean_val_accuracy": 0.9111666666666668,
+    "std_val_accuracy": 0.0087511903952167,
+    "mean_val_macro_f1": 0.9101856150560738,
+    "std_val_macro_f1": 0.0093336723168462,
+    "mean_fit_seconds": 0.3525428666665296
   }
 }

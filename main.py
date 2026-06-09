@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 import warnings
 from dataclasses import dataclass
@@ -12,7 +13,12 @@ import matplotlib.pyplot as plt
 import nbformat as nbf
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator
+
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", "2")
+
+from sklearn.base import BaseEstimator, clone
+from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import (
@@ -21,7 +27,7 @@ from sklearn.metrics import (
     confusion_matrix,
     f1_score,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -206,6 +212,37 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, fl
 
 def evaluate_model(model: BaseEstimator, x: np.ndarray, y: np.ndarray) -> dict[str, float]:
     return evaluate_predictions(y, model.predict(x))
+
+
+def fit_kmeans_label_map(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    seed: int,
+) -> tuple[Pipeline, dict[int, int]]:
+    """Fit KMeans without labels, then map clusters to digits by majority vote."""
+
+    model = Pipeline(
+        [
+            ("standardize", StandardScaler()),
+            ("pca", PCA(n_components=64, whiten=True, random_state=seed)),
+            ("kmeans", KMeans(n_clusters=10, n_init=10, random_state=seed)),
+        ]
+    )
+    model.fit(x_train)
+    clusters = model.predict(x_train)
+    mapping: dict[int, int] = {}
+    for cluster_id in range(10):
+        cluster_labels = y_train[clusters == cluster_id]
+        if len(cluster_labels) == 0:
+            mapping[cluster_id] = 0
+        else:
+            mapping[cluster_id] = int(np.bincount(cluster_labels, minlength=10).argmax())
+    return model, mapping
+
+
+def predict_kmeans_labels(model: Pipeline, mapping: dict[int, int], x: np.ndarray) -> np.ndarray:
+    clusters = model.predict(x)
+    return np.array([mapping[int(cluster)] for cluster in clusters], dtype=np.int64)
 
 
 def run_required_experiments(args: argparse.Namespace) -> pd.DataFrame:
@@ -581,6 +618,148 @@ def run_loss_study(args: argparse.Namespace) -> pd.DataFrame:
     return results
 
 
+def run_kmeans_baseline(args: argparse.Namespace) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for train_dataset in REQUIRED_TRAIN_DATASETS:
+        bundle = make_train_val_bundle(
+            train_dataset,
+            val_size=args.val_size,
+            train_limit=args.kmeans_limit,
+            seed=args.seed,
+        )
+        start = time.perf_counter()
+        model, mapping = fit_kmeans_label_map(bundle.x_train, bundle.y_train, args.seed)
+        fit_seconds = time.perf_counter() - start
+
+        val_pred = predict_kmeans_labels(model, mapping, bundle.x_val)
+        val_metrics = evaluate_predictions(bundle.y_val, val_pred)
+        test_x, test_y = load_test_set(train_dataset, args.test_limit, args.seed)
+        test_pred = predict_kmeans_labels(model, mapping, test_x)
+        test_metrics = evaluate_predictions(test_y, test_pred)
+        rows.append(
+            {
+                "experiment": "kmeans_same_corruption",
+                "train_dataset": train_dataset,
+                "eval_dataset": train_dataset,
+                "model": "pca64_kmeans_majority_vote",
+                "train_samples": len(bundle.y_train),
+                "val_samples": len(bundle.y_val),
+                "test_samples": len(test_y),
+                "val_accuracy": val_metrics["accuracy"],
+                "val_macro_f1": val_metrics["macro_f1"],
+                "test_accuracy": test_metrics["accuracy"],
+                "test_macro_f1": test_metrics["macro_f1"],
+                "fit_seconds": fit_seconds,
+            }
+        )
+
+        if train_dataset == "identity":
+            for eval_dataset in NOISE_DATASETS:
+                cross_x, cross_y = load_test_set(eval_dataset, args.test_limit, args.seed)
+                cross_pred = predict_kmeans_labels(model, mapping, cross_x)
+                cross_metrics = evaluate_predictions(cross_y, cross_pred)
+                rows.append(
+                    {
+                        "experiment": "kmeans_identity_to_noise",
+                        "train_dataset": "identity",
+                        "eval_dataset": eval_dataset,
+                        "model": "pca64_kmeans_majority_vote",
+                        "train_samples": len(bundle.y_train),
+                        "val_samples": len(bundle.y_val),
+                        "test_samples": len(cross_y),
+                        "val_accuracy": val_metrics["accuracy"],
+                        "val_macro_f1": val_metrics["macro_f1"],
+                        "test_accuracy": cross_metrics["accuracy"],
+                        "test_macro_f1": cross_metrics["macro_f1"],
+                        "fit_seconds": fit_seconds,
+                    }
+                )
+
+    results = pd.DataFrame(rows)
+    results.to_csv(TABLE_DIR / "kmeans_baseline.csv", index=False, encoding="utf-8")
+    plot_kmeans_baseline(results)
+    return results
+
+
+def plot_kmeans_baseline(results: pd.DataFrame) -> None:
+    shown = results.copy()
+    shown["label"] = shown["train_dataset"] + " -> " + shown["eval_dataset"]
+    fig, ax = plt.subplots(figsize=(9, 4))
+    ax.bar(shown["label"], shown["test_accuracy"], color="#f28e2b")
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("Test accuracy")
+    ax.set_title("Unsupervised KMeans baseline")
+    ax.tick_params(axis="x", rotation=35)
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(FIGURE_DIR / "kmeans_baseline_accuracy.png", dpi=180)
+    plt.close(fig)
+
+
+def run_cross_validation_study(args: argparse.Namespace) -> pd.DataFrame:
+    x, y = load_mnist_c_split("identity", "train")
+    x, y = stratified_limit(x, y, args.cv_limit, args.seed)
+    splitter = StratifiedKFold(n_splits=3, shuffle=True, random_state=args.seed)
+
+    rows: list[dict[str, object]] = []
+    for model_name, template in model_zoo(args.study_max_iter, args.seed).items():
+        for fold, (train_idx, val_idx) in enumerate(splitter.split(x, y), start=1):
+            model = clone(template)
+            start = time.perf_counter()
+            model.fit(x[train_idx], y[train_idx])
+            fit_seconds = time.perf_counter() - start
+            pred = model.predict(x[val_idx])
+            metrics = evaluate_predictions(y[val_idx], pred)
+            rows.append(
+                {
+                    "dataset": "identity",
+                    "model": model_name,
+                    "fold": fold,
+                    "train_samples": len(train_idx),
+                    "val_samples": len(val_idx),
+                    "val_accuracy": metrics["accuracy"],
+                    "val_macro_f1": metrics["macro_f1"],
+                    "fit_seconds": fit_seconds,
+                }
+            )
+
+    results = pd.DataFrame(rows)
+    results.to_csv(TABLE_DIR / "cross_validation_results.csv", index=False, encoding="utf-8")
+    summary = (
+        results.groupby("model", as_index=False)
+        .agg(
+            mean_val_accuracy=("val_accuracy", "mean"),
+            std_val_accuracy=("val_accuracy", "std"),
+            mean_val_macro_f1=("val_macro_f1", "mean"),
+            std_val_macro_f1=("val_macro_f1", "std"),
+            mean_fit_seconds=("fit_seconds", "mean"),
+        )
+        .sort_values("mean_val_accuracy", ascending=False)
+    )
+    summary.to_csv(TABLE_DIR / "cross_validation_summary.csv", index=False, encoding="utf-8")
+    plot_cross_validation(summary)
+    return results
+
+
+def plot_cross_validation(summary: pd.DataFrame) -> None:
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.bar(
+        summary["model"],
+        summary["mean_val_accuracy"],
+        yerr=summary["std_val_accuracy"].fillna(0),
+        color="#b07aa1",
+        capsize=4,
+    )
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("3-fold validation accuracy")
+    ax.set_title("Cross-validation on identity")
+    ax.tick_params(axis="x", rotation=20)
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(FIGURE_DIR / "cross_validation_accuracy.png", dpi=180)
+    plt.close(fig)
+
+
 def run_optional_combined_experiment(args: argparse.Namespace) -> pd.DataFrame:
     x_parts: list[np.ndarray] = []
     y_parts: list[np.ndarray] = []
@@ -635,6 +814,7 @@ def run_optional_combined_experiment(args: argparse.Namespace) -> pd.DataFrame:
     results = pd.DataFrame(rows)
     results.to_csv(TABLE_DIR / "optional_all_datasets_accuracy.csv", index=False, encoding="utf-8")
     plot_optional_results(results)
+    plot_optional_misclassifications(model, results, args)
     return results
 
 
@@ -648,6 +828,59 @@ def plot_optional_results(results: pd.DataFrame) -> None:
     ax.grid(axis="y", alpha=0.25)
     fig.tight_layout()
     fig.savefig(FIGURE_DIR / "optional_all_datasets_accuracy.png", dpi=180)
+    plt.close(fig)
+
+
+def plot_dataset_examples(examples_per_dataset: int = 5) -> None:
+    datasets = available_datasets()
+    fig, axes = plt.subplots(
+        len(datasets),
+        examples_per_dataset,
+        figsize=(examples_per_dataset * 1.5, len(datasets) * 1.1),
+    )
+    for row, dataset in enumerate(datasets):
+        x, y = load_test_set(dataset, test_limit=None, seed=RANDOM_STATE)
+        for col in range(examples_per_dataset):
+            ax = axes[row, col]
+            ax.imshow(x[col].reshape(28, 28), cmap="gray")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if row == 0:
+                ax.set_title(f"label {int(y[col])}", fontsize=8)
+            if col == 0:
+                ax.set_ylabel(dataset, rotation=0, ha="right", va="center", fontsize=8)
+    fig.suptitle("MNIST-C examples by dataset", y=0.995)
+    fig.tight_layout()
+    fig.savefig(FIGURE_DIR / "mnist_c_dataset_examples.png", dpi=180)
+    plt.close(fig)
+
+
+def plot_optional_misclassifications(
+    model: BaseEstimator,
+    results: pd.DataFrame,
+    args: argparse.Namespace,
+    max_examples: int = 24,
+) -> None:
+    worst = results.sort_values("test_accuracy", ascending=True).iloc[0]
+    dataset = str(worst["eval_dataset"])
+    x_test, y_test = load_test_set(dataset, args.test_limit, args.seed)
+    pred = model.predict(x_test)
+    wrong_idx = np.flatnonzero(pred != y_test)
+    if len(wrong_idx) == 0:
+        return
+    selected = wrong_idx[:max_examples]
+    cols = 6
+    rows = math.ceil(len(selected) / cols)
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.4, rows * 1.65))
+    axes = np.array(axes).reshape(rows, cols)
+    for ax in axes.ravel():
+        ax.axis("off")
+    for ax, idx in zip(axes.ravel(), selected):
+        ax.imshow(x_test[idx].reshape(28, 28), cmap="gray")
+        ax.set_title(f"T:{int(y_test[idx])} P:{int(pred[idx])}", fontsize=8)
+    fig.suptitle(f"Misclassified examples on optional worst dataset: {dataset}", y=0.98)
+    fig.tight_layout()
+    fig.savefig(FIGURE_DIR / "optional_worst_misclassified_examples.png", dpi=180)
     plt.close(fig)
 
 
@@ -672,6 +905,8 @@ def summarize_results() -> dict[str, object]:
     preprocessing_file = TABLE_DIR / "preprocessing_study.csv"
     hyper_file = TABLE_DIR / "hyperparameter_search.csv"
     loss_file = TABLE_DIR / "loss_comparison.csv"
+    kmeans_file = TABLE_DIR / "kmeans_baseline.csv"
+    cv_file = TABLE_DIR / "cross_validation_summary.csv"
 
     if required_file.exists():
         required = pd.read_csv(required_file)
@@ -693,6 +928,12 @@ def summarize_results() -> dict[str, object]:
     if loss_file.exists():
         loss = pd.read_csv(loss_file)
         summary["best_loss"] = loss.sort_values("val_accuracy", ascending=False).iloc[0].to_dict()
+    if kmeans_file.exists():
+        kmeans = pd.read_csv(kmeans_file)
+        summary["best_kmeans_baseline"] = kmeans.sort_values("test_accuracy", ascending=False).iloc[0].to_dict()
+    if cv_file.exists():
+        cv = pd.read_csv(cv_file)
+        summary["best_cross_validation_model"] = cv.sort_values("mean_val_accuracy", ascending=False).iloc[0].to_dict()
 
     with (OUTPUT_DIR / "summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
@@ -704,6 +945,8 @@ def make_notebook() -> Path:
     preprocessing = pd.read_csv(TABLE_DIR / "preprocessing_study.csv")
     hyper = pd.read_csv(TABLE_DIR / "hyperparameter_search.csv")
     loss = pd.read_csv(TABLE_DIR / "loss_comparison.csv")
+    kmeans = pd.read_csv(TABLE_DIR / "kmeans_baseline.csv")
+    cv_summary = pd.read_csv(TABLE_DIR / "cross_validation_summary.csv")
     optional = pd.read_csv(TABLE_DIR / "optional_all_datasets_accuracy.csv")
     summarize_results()
 
@@ -713,6 +956,8 @@ def make_notebook() -> Path:
     worst_optional = optional.sort_values("test_accuracy", ascending=True).iloc[0]
     best_loss = loss.sort_values("val_accuracy", ascending=False).iloc[0]
     best_hyper = hyper.sort_values("val_accuracy", ascending=False).iloc[0]
+    best_kmeans = kmeans.sort_values("test_accuracy", ascending=False).iloc[0]
+    best_cv = cv_summary.sort_values("mean_val_accuracy", ascending=False).iloc[0]
 
     nb = nbf.v4.new_notebook()
     nb["metadata"] = {
@@ -781,6 +1026,8 @@ def make_notebook() -> Path:
             "preprocessing = pd.read_csv(TABLE_DIR / 'preprocessing_study.csv')\n"
             "hyper = pd.read_csv(TABLE_DIR / 'hyperparameter_search.csv')\n"
             "loss = pd.read_csv(TABLE_DIR / 'loss_comparison.csv')\n"
+            "kmeans = pd.read_csv(TABLE_DIR / 'kmeans_baseline.csv')\n"
+            "cv_summary = pd.read_csv(TABLE_DIR / 'cross_validation_summary.csv')\n"
             "optional = pd.read_csv(TABLE_DIR / 'optional_all_datasets_accuracy.csv')"
         ),
         nbf.v4.new_markdown_cell(
@@ -792,6 +1039,8 @@ def make_notebook() -> Path:
             "| `mlp_2hidden` | 标准化 + 128/64 双隐层 MLP | 增加非线性容量 |\n"
             "| `pca_mlp` | 标准化 + PCA(64) + 单隐层 MLP | 使用无监督 PCA 表示后再分类 |\n\n"
             "这 3 个方案覆盖了监督学习神经网络和无监督特征学习 + 监督分类的组合方式。"
+            "此外，新增 `pca64_kmeans_majority_vote` 作为无监督 KMeans 基线："
+            "训练阶段只用图像聚类，评价阶段再用多数投票把簇映射到数字标签。"
         ),
         nbf.v4.new_markdown_cell(
             "### 4.3 损失衡量与参数优化\n\n"
@@ -821,7 +1070,37 @@ def make_notebook() -> Path:
             "模型容量过小容易欠拟合，容量过大或学习率过高则更容易在噪声图像上不稳定。"
         ),
         nbf.v4.new_markdown_cell(
-            "## 8. 必做部分实验结果\n\n"
+            "## 8. 无监督 KMeans 基线\n\n"
+            "为更明确地覆盖无监督学习，本实验增加 `PCA(64) + KMeans(10)`。"
+            "KMeans 训练时不使用标签；训练完成后，仅为了评价聚类结果，用训练集多数投票将每个簇映射为一个数字类别。"
+            "该方法通常低于监督神经网络，但可以反映 MNIST-C 数据在无标签条件下的自然可分性。\n\n"
+            + dataframe_to_markdown(kmeans)
+        ),
+        nbf.v4.new_markdown_cell(
+            "![KMeans 无监督基线准确率](outputs/figures/kmeans_baseline_accuracy.png)"
+        ),
+        nbf.v4.new_markdown_cell(
+            f"KMeans 基线中表现最好的记录是 `{best_kmeans['train_dataset']}` -> `{best_kmeans['eval_dataset']}`，"
+            f"测试准确率为 {format_rate(float(best_kmeans['test_accuracy']))}。"
+            "它的准确率低于 MLP，原因是 KMeans 只按像素空间距离形成簇，不能直接学习数字类别边界。"
+        ),
+        nbf.v4.new_markdown_cell(
+            "## 9. 交叉验证\n\n"
+            "除单次训练/验证划分外，本实验在 `identity` 训练集上进行 3 折交叉验证。"
+            "每一折轮流作为验证集，其余两折训练模型，最后比较平均准确率和标准差。"
+            "这能减少单次划分带来的偶然性，更符合指导书中“不同验证方法”的要求。\n\n"
+            + dataframe_to_markdown(cv_summary)
+        ),
+        nbf.v4.new_markdown_cell(
+            "![3 折交叉验证准确率](outputs/figures/cross_validation_accuracy.png)"
+        ),
+        nbf.v4.new_markdown_cell(
+            f"3 折交叉验证中平均验证准确率最高的是 `{best_cv['model']}`，"
+            f"平均准确率为 {format_rate(float(best_cv['mean_val_accuracy']))}，"
+            f"标准差为 {format_rate(float(best_cv['std_val_accuracy']))}。"
+        ),
+        nbf.v4.new_markdown_cell(
+            "## 10. 必做部分实验结果\n\n"
             "下表包含两类结果：\n\n"
             "- `required_same_corruption`：在 `identity`、`shot_noise`、`rotate` 上分别训练 3 个神经网络，并在同类测试集上评价。\n"
             "- `identity_to_noise`：用 `identity` 训练的 3 个神经网络，分别测试到 `shot_noise` 和 `rotate`，用于观察分布外鲁棒性。"
@@ -839,7 +1118,7 @@ def make_notebook() -> Path:
             "`shot_noise` 主要破坏局部像素，`rotate` 则改变几何形态，二者造成的错误类型不同。"
         ),
         nbf.v4.new_markdown_cell(
-            "## 9. 选做部分实验结果\n\n"
+            "## 11. 选做部分实验结果\n\n"
             "选做部分将 `identity`、`shot_noise`、`rotate` 的训练样本合并，训练一个双隐层 MLP，"
             "再在本地全部 16 个 MNIST-C 测试集上评价。"
         ),
@@ -855,7 +1134,20 @@ def make_notebook() -> Path:
             "训练集中包含的噪声类型通常更容易被识别；未见过的几何变换、边缘化或强遮挡类破坏更容易导致准确率下降。"
         ),
         nbf.v4.new_markdown_cell(
-            "## 10. 测试代码\n\n"
+            "## 12. 样例与误分类可视化\n\n"
+            "下图展示本地全部 MNIST-C 子集的样例，便于直观比较不同破坏类型。"
+            "误分类图来自选做组合模型表现最差的测试集，标题中的 `T` 表示真实标签，`P` 表示预测标签。"
+        ),
+        nbf.v4.new_markdown_cell(
+            "![MNIST-C 各子集样例](outputs/figures/mnist_c_dataset_examples.png)\n\n"
+            "![选做模型误分类样例](outputs/figures/optional_worst_misclassified_examples.png)"
+        ),
+        nbf.v4.new_markdown_cell(
+            "样例图说明：随机噪声、线条遮挡、亮度变化、边缘化等破坏会改变像素分布，"
+            "而 MLP 没有卷积结构中的局部平移不变性，因此在未见过或视觉形态变化较大的数据集上更容易误判。"
+        ),
+        nbf.v4.new_markdown_cell(
+            "## 13. 测试代码\n\n"
             "下面的代码可以重新运行全部实验并刷新结果文件。默认参数使用分层抽样以便在普通电脑上完成；"
             "若希望使用完整训练集，可把 `--train-limit` 和 `--optional-train-limit` 设置为 `0`。"
         ),
@@ -866,12 +1158,13 @@ def make_notebook() -> Path:
             "# !python main.py --train-limit 0 --optional-train-limit 0 --max-iter 20"
         ),
         nbf.v4.new_markdown_cell(
-            "## 11. 结论\n\n"
+            "## 14. 结论\n\n"
             "1. 数据处理方面，标准化对 MLP 训练最重要，PCA 可作为速度和鲁棒性的折中，但不一定提升最高准确率。\n"
             "2. 模型方面，双隐层 MLP 通常比单隐层模型有更强表示能力，PCA+MLP 在部分噪声上更稳定但上限较低。\n"
             "3. 损失函数方面，交叉熵更适合多分类概率学习；标签平滑适合作为增强鲁棒性的候选策略；MSE 的分类优化效率较低。\n"
-            "4. 参数方面，隐藏层规模、学习率和 L2 正则共同影响泛化，不能只追求更大模型。\n"
-            "5. 鲁棒性方面，identity 上训练的模型跨到噪声测试集时明显下降，说明多噪声训练或数据增强是提升分布外鲁棒性的关键。"
+            "4. 无监督学习方面，KMeans 能给出可解释聚类基线，但缺少类别边界学习，准确率明显低于监督神经网络。\n"
+            "5. 验证方法方面，3 折交叉验证比单次 hold-out 更稳定，适合用于说明模型选择的可靠性。\n"
+            "6. 鲁棒性方面，identity 上训练的模型跨到噪声测试集时明显下降，说明多噪声训练或数据增强是提升分布外鲁棒性的关键。"
         ),
     ]
 
@@ -889,6 +1182,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--optional-train-limit", type=int, default=8000)
     parser.add_argument("--test-limit", type=int, default=0)
     parser.add_argument("--study-limit", type=int, default=8000)
+    parser.add_argument("--kmeans-limit", type=int, default=8000)
+    parser.add_argument("--cv-limit", type=int, default=6000)
     parser.add_argument("--max-iter", type=int, default=12)
     parser.add_argument("--study-max-iter", type=int, default=8)
     parser.add_argument("--loss-epochs", type=int, default=8)
@@ -899,7 +1194,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def normalize_limits(args: argparse.Namespace) -> argparse.Namespace:
-    for attr in ("train_limit", "optional_train_limit", "test_limit", "study_limit"):
+    for attr in ("train_limit", "optional_train_limit", "test_limit", "study_limit", "kmeans_limit", "cv_limit"):
         value = getattr(args, attr)
         setattr(args, attr, None if value is None or value <= 0 else value)
     return args
@@ -917,10 +1212,16 @@ def main() -> None:
     run_loss_study(args)
     print("Running hyperparameter search...")
     run_hyperparameter_search(args)
+    print("Running unsupervised KMeans baseline...")
+    run_kmeans_baseline(args)
+    print("Running 3-fold cross-validation...")
+    run_cross_validation_study(args)
     print("Running required experiments...")
     run_required_experiments(args)
     print("Running optional combined-training experiment...")
     run_optional_combined_experiment(args)
+    print("Saving dataset example visualization...")
+    plot_dataset_examples()
     summary = summarize_results()
     if not args.skip_notebook:
         notebook_path = make_notebook()
