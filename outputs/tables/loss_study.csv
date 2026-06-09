@@ -1,0 +1,4 @@
+﻿dataset,model,loss,train_samples,val_samples,val_accuracy,val_macro_f1,train_seconds
+identity,Numpy_1hidden_MLP,cross_entropy,400,100,0.34,0.3047209284495812,0.006
+identity,Numpy_1hidden_MLP,label_smoothing,400,100,0.34,0.3038212433393698,0.005
+identity,Numpy_1hidden_MLP,mse,400,100,0.1,0.07320066470524136,0.005

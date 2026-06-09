@@ -1,0 +1,6 @@
+matplotlib
+nbformat
+numpy
+pandas
+scikit-learn
+tabulate

@@ -1,0 +1,105 @@
+{
+  "datasets_found": [
+    "identity",
+    "shot_noise",
+    "impulse_noise",
+    "glass_blur",
+    "motion_blur",
+    "shear",
+    "scale",
+    "rotate",
+    "brightness",
+    "translate",
+    "stripe",
+    "fog",
+    "spatter",
+    "dotted_line",
+    "zigzag",
+    "canny_edges"
+  ],
+  "required_train_datasets": [
+    "identity",
+    "shot_noise",
+    "rotate"
+  ],
+  "noise_datasets": [
+    "shot_noise",
+    "rotate"
+  ],
+  "best_required_same": {
+    "experiment": "required_same_corruption",
+    "train_dataset": "identity",
+    "eval_dataset": "identity",
+    "model": "mlp_2hidden",
+    "train_samples": 12000,
+    "val_samples": 3000,
+    "test_samples": 10000,
+    "val_accuracy": 0.9456666666666668,
+    "val_macro_f1": 0.9451391673839206,
+    "test_accuracy": 0.9486,
+    "test_macro_f1": 0.9479983287960666,
+    "fit_seconds": 1.373823899999934
+  },
+  "identity_cross_noise_mean_accuracy": 0.8028333333333334,
+  "optional_mean_accuracy": 0.44676875,
+  "optional_best_dataset": {
+    "experiment": "optional_combined_train",
+    "train_datasets": "identity+shot_noise+rotate",
+    "eval_dataset": "identity",
+    "model": "mlp_2hidden",
+    "train_samples": 19200,
+    "val_samples": 4800,
+    "test_samples": 10000,
+    "val_accuracy": 0.9470833333333334,
+    "val_macro_f1": 0.9465739447158406,
+    "test_accuracy": 0.9516,
+    "test_macro_f1": 0.9510116172546996,
+    "fit_seconds": 2.748448000000053
+  },
+  "optional_worst_dataset": {
+    "experiment": "optional_combined_train",
+    "train_datasets": "identity+shot_noise+rotate",
+    "eval_dataset": "brightness",
+    "model": "mlp_2hidden",
+    "train_samples": 19200,
+    "val_samples": 4800,
+    "test_samples": 10000,
+    "val_accuracy": 0.9470833333333334,
+    "val_macro_f1": 0.9465739447158406,
+    "test_accuracy": 0.101,
+    "test_macro_f1": 0.0183502906976744,
+    "fit_seconds": 2.748448000000053
+  },
+  "best_preprocessing": {
+    "dataset": "identity",
+    "preprocessing": "standardize",
+    "validation_split": 0.1,
+    "train_samples": 7200,
+    "val_samples": 800,
+    "val_accuracy": 0.9125,
+    "val_macro_f1": 0.9120173040721749,
+    "fit_seconds": 0.3919777000000977
+  },
+  "best_hyperparameters": {
+    "dataset": "identity",
+    "hidden_layer_sizes": "(256, 128)",
+    "alpha_l2": 0.0001,
+    "learning_rate_init": 0.001,
+    "train_samples": 6400,
+    "val_samples": 1600,
+    "val_accuracy": 0.928125,
+    "val_macro_f1": 0.9274509628800888,
+    "fit_seconds": 0.8827387000001181
+  },
+  "best_loss": {
+    "dataset": "identity",
+    "network": "numpy_two_layer_mlp",
+    "loss": "cross_entropy",
+    "label_smoothing": 0.0,
+    "train_samples": 6400,
+    "val_samples": 1600,
+    "val_accuracy": 0.9025,
+    "val_macro_f1": 0.9015777281834808,
+    "fit_seconds": 0.3389648999998371
+  }
+}
