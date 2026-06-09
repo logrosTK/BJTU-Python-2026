@@ -14,6 +14,7 @@ import nbformat as nbf
 import numpy as np
 import pandas as pd
 
+# KMeans 在 Windows + MKL 下线程数太高会有无关警告，这里固定一下。
 os.environ.setdefault("OMP_NUM_THREADS", "2")
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "2")
 
@@ -44,8 +45,12 @@ TABLE_DIR = OUTPUT_DIR / "tables"
 MODEL_DIR = OUTPUT_DIR / "models"
 
 RANDOM_STATE = 42
+
+# 必做实验用 identity 加两个噪声集，选做实验也沿用这三组做合并训练。
 REQUIRED_TRAIN_DATASETS = ["identity", "shot_noise", "rotate"]
 NOISE_DATASETS = ["shot_noise", "rotate"]
+
+# 表格和图里的数据集顺序固定下来，避免每次按文件夹排序看起来不一样。
 DISPLAY_DATASET_ORDER = [
     "identity",
     "shot_noise",
@@ -86,8 +91,6 @@ def available_datasets() -> list[str]:
 
 
 def load_mnist_c_split(dataset: str, split: str) -> tuple[np.ndarray, np.ndarray]:
-    """Load one MNIST-C split and return flattened float32 images in [0, 1]."""
-
     folder = DATA_DIR / dataset
     image_file = folder / f"{split}_images.npy"
     label_file = folder / f"{split}_labels.npy"
@@ -96,6 +99,7 @@ def load_mnist_c_split(dataset: str, split: str) -> tuple[np.ndarray, np.ndarray
 
     images = np.load(image_file)
     labels = np.load(label_file).astype(np.int64)
+    # MLP 和 KMeans 都吃一维特征，所以这里直接展平成 784 维。
     images = images.reshape(images.shape[0], -1).astype(np.float32) / 255.0
     return images, labels
 
@@ -108,6 +112,7 @@ def stratified_limit(
 ) -> tuple[np.ndarray, np.ndarray]:
     if limit is None or limit <= 0 or limit >= len(y):
         return x, y
+    # 分层抽样保留 0-9 的类别比例，避免小样本时某些数字被抽偏。
     _, x_sub, _, y_sub = train_test_split(
         x,
         y,
@@ -126,6 +131,7 @@ def make_train_val_bundle(
 ) -> DatasetBundle:
     x, y = load_mnist_c_split(dataset, "train")
     x, y = stratified_limit(x, y, train_limit, seed)
+    # 官方 test 集只留到最后评估，这里从 train 里再切出验证集。
     x_train, x_val, y_train, y_val = train_test_split(
         x,
         y,
@@ -153,6 +159,7 @@ def make_mlp(
     alpha: float = 1e-4,
     learning_rate_init: float = 1e-3,
 ) -> Pipeline:
+    # 这几个 MLP 都用同一套训练参数，差别主要放在网络宽度和 PCA 上。
     clf = MLPClassifier(
         hidden_layer_sizes=hidden_layer_sizes,
         activation="relu",
@@ -169,12 +176,14 @@ def make_mlp(
     )
     steps: list[tuple[str, BaseEstimator]] = [("standardize", StandardScaler())]
     if name == "pca_mlp":
+        # PCA 是无监督降维，放在 MLP 前面看压缩特征会不会更稳。
         steps.append(("pca", PCA(n_components=64, whiten=True, random_state=seed)))
     steps.append(("mlp", clf))
     return Pipeline(steps)
 
 
 def model_zoo(max_iter: int, seed: int = RANDOM_STATE) -> dict[str, Pipeline]:
+    # 必做部分要求 3 个神经网络，这里统一放在一个字典里便于循环训练。
     return {
         "mlp_1hidden": make_mlp(
             "mlp_1hidden",
@@ -219,8 +228,6 @@ def fit_kmeans_label_map(
     y_train: np.ndarray,
     seed: int,
 ) -> tuple[Pipeline, dict[int, int]]:
-    """Fit KMeans without labels, then map clusters to digits by majority vote."""
-
     model = Pipeline(
         [
             ("standardize", StandardScaler()),
@@ -236,6 +243,7 @@ def fit_kmeans_label_map(
         if len(cluster_labels) == 0:
             mapping[cluster_id] = 0
         else:
+            # KMeans 本身不知道数字标签，评估时用多数投票把簇编号翻译成 0-9。
             mapping[cluster_id] = int(np.bincount(cluster_labels, minlength=10).argmax())
     return model, mapping
 
@@ -250,6 +258,7 @@ def run_required_experiments(args: argparse.Namespace) -> pd.DataFrame:
     trained_models: dict[tuple[str, str], BaseEstimator] = {}
 
     for train_dataset in REQUIRED_TRAIN_DATASETS:
+        # 每个数据集单独训练三种网络，正好对应指导书必做部分。
         bundle = make_train_val_bundle(
             train_dataset,
             val_size=args.val_size,
@@ -346,6 +355,7 @@ def plot_confusion_for_best_required(
     trained_models: dict[tuple[str, str], BaseEstimator],
     args: argparse.Namespace,
 ) -> None:
+    # 混淆矩阵只画必做部分里测试准确率最高的模型，报告里更容易讲清楚。
     required_file = TABLE_DIR / "required_results.csv"
     if not required_file.exists():
         return
@@ -374,6 +384,7 @@ def plot_confusion_for_best_required(
 
 def run_preprocessing_study(args: argparse.Namespace) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
+    # 对比两种验证集比例、是否标准化，以及标准化后加 PCA 的效果。
     settings = [
         ("scale01", 0.20, False),
         ("scale01", 0.10, False),
@@ -442,6 +453,7 @@ def run_hyperparameter_search(args: argparse.Namespace) -> pd.DataFrame:
         train_limit=args.study_limit,
         seed=args.seed,
     )
+    # 网格不做得太大，主要看隐藏层规模、L2 正则和学习率这三个方向。
     grid = [
         ((64,), 1e-4, 1e-3),
         ((128,), 1e-4, 1e-3),
@@ -537,10 +549,12 @@ class TinyNumpyNN:
                 probs = self._softmax(logits)
                 target = self._one_hot(yb, self.output_dim)
                 if self.loss == "label_smoothing":
+                    # 标签平滑把 1/0 标签稍微摊开，降低模型过度自信。
                     eps = self.label_smoothing
                     target = (1.0 - eps) * target + eps / self.output_dim
                     dlogits = (probs - target) / len(yb)
                 elif self.loss == "mse":
+                    # MSE 先经过 softmax，再按链式法则回传到 logits。
                     diff = probs - target
                     centered = diff - np.sum(diff * probs, axis=1, keepdims=True)
                     dlogits = (2.0 / self.output_dim) * probs * centered / len(yb)
@@ -578,6 +592,7 @@ def run_loss_study(args: argparse.Namespace) -> pd.DataFrame:
     scaler = StandardScaler()
     x_train = scaler.fit_transform(bundle.x_train)
     x_val = scaler.transform(bundle.x_val)
+    # sklearn 的 MLPClassifier 不方便直接换损失函数，所以这里用小 NumPy 网络单独比较。
     configs = [
         ("cross_entropy", 0.0),
         ("label_smoothing", 0.1),
@@ -621,6 +636,7 @@ def run_loss_study(args: argparse.Namespace) -> pd.DataFrame:
 def run_kmeans_baseline(args: argparse.Namespace) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for train_dataset in REQUIRED_TRAIN_DATASETS:
+        # KMeans 训练阶段不看标签，标签只在最后做簇到数字的解释。
         bundle = make_train_val_bundle(
             train_dataset,
             val_size=args.val_size,
@@ -699,11 +715,13 @@ def plot_kmeans_baseline(results: pd.DataFrame) -> None:
 def run_cross_validation_study(args: argparse.Namespace) -> pd.DataFrame:
     x, y = load_mnist_c_split("identity", "train")
     x, y = stratified_limit(x, y, args.cv_limit, args.seed)
+    # 3 折交叉验证用来检查模型选择是否受一次划分影响太大。
     splitter = StratifiedKFold(n_splits=3, shuffle=True, random_state=args.seed)
 
     rows: list[dict[str, object]] = []
     for model_name, template in model_zoo(args.study_max_iter, args.seed).items():
         for fold, (train_idx, val_idx) in enumerate(splitter.split(x, y), start=1):
+            # 每一折都 clone 新模型，避免上一次训练的参数残留。
             model = clone(template)
             start = time.perf_counter()
             model.fit(x[train_idx], y[train_idx])
@@ -769,6 +787,7 @@ def run_optional_combined_experiment(args: argparse.Namespace) -> pd.DataFrame:
         x_parts.append(x)
         y_parts.append(y)
 
+    # 选做部分把三组训练数据拼在一起，训练一个更偏鲁棒性的模型。
     x_all = np.vstack(x_parts)
     y_all = np.concatenate(y_parts)
     x_train, x_val, y_train, y_val = train_test_split(
@@ -833,6 +852,7 @@ def plot_optional_results(results: pd.DataFrame) -> None:
 
 def plot_dataset_examples(examples_per_dataset: int = 5) -> None:
     datasets = available_datasets()
+    # 每个破坏类型放一行，展示时比单纯文字解释直观很多。
     fig, axes = plt.subplots(
         len(datasets),
         examples_per_dataset,
@@ -868,6 +888,7 @@ def plot_optional_misclassifications(
     wrong_idx = np.flatnonzero(pred != y_test)
     if len(wrong_idx) == 0:
         return
+    # 只取前几张错例，重点看错误模式，不追求把所有错例都画出来。
     selected = wrong_idx[:max_examples]
     cols = 6
     rows = math.ceil(len(selected) / cols)
@@ -900,6 +921,7 @@ def summarize_results() -> dict[str, object]:
         "noise_datasets": NOISE_DATASETS,
     }
 
+    # summary.json 只放报告里最常用的几项，详细结果仍然看 csv。
     required_file = TABLE_DIR / "required_results.csv"
     optional_file = TABLE_DIR / "optional_all_datasets_accuracy.csv"
     preprocessing_file = TABLE_DIR / "preprocessing_study.csv"
@@ -941,6 +963,7 @@ def summarize_results() -> dict[str, object]:
 
 
 def make_notebook() -> Path:
+    # Notebook 用已经生成好的 csv 和 png 组装，避免打开报告时重新训练。
     required = pd.read_csv(TABLE_DIR / "required_results.csv")
     preprocessing = pd.read_csv(TABLE_DIR / "preprocessing_study.csv")
     hyper = pd.read_csv(TABLE_DIR / "hyperparameter_search.csv")
@@ -993,11 +1016,13 @@ def make_notebook() -> Path:
             "## 2. 队伍分工说明\n\n"
             "| 成员 | 分工 |\n"
             "|---|---|\n"
-            "| 组长 | 任务拆解、实验方案设计、报告统稿、展示组织 |\n"
-            "| 成员 A | 数据读取、数据划分、预处理对比实验 |\n"
-            "| 成员 B | 神经网络模型训练、损失函数与参数搜索实验 |\n"
-            "| 成员 C | 选做鲁棒性实验、图表整理、结果分析 |\n\n"
-            "> 如需提交时写真实姓名，可直接把上表中的占位成员替换为本组成员。"
+            "| 李响 | 数据读取、训练/验证划分、预处理对比实验 |\n"
+            "| 刘晨辉 | MLP 模型训练、必做部分同分布与跨噪声测试 |\n"
+            "| 陈思铭 | KMeans 无监督基线、3 折交叉验证实验 |\n"
+            "| 田扩 | 选做部分合并训练、全部 MNIST-C 测试集评估 |\n"
+            "| 廖佳文 | 数据样例图、误分类样例图、实验图表整理 |\n"
+            "| 柴子轩 | 结果分析、报告整理、展示讨论记录 |\n\n"
+            "本组没有单独设置队长，实验设计、结果讨论和报告修改由全体成员共同完成。"
         ),
         nbf.v4.new_markdown_cell(
             "## 3. 讨论记录\n\n"
@@ -1206,6 +1231,7 @@ def main() -> None:
 
     print("MNIST-C datasets:", ", ".join(available_datasets()))
     print("Required training datasets:", ", ".join(REQUIRED_TRAIN_DATASETS))
+    # 下面按报告章节顺序跑，后面的 make_notebook 会直接读取这些输出文件。
     print("Running preprocessing study...")
     run_preprocessing_study(args)
     print("Running loss-function study...")
